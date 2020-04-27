@@ -1,0 +1,29 @@
+package folderreader;
+import java.io.*;
+import java.util.Properties;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import folderreader.LIbrary1;
+
+public class FolderReader {
+
+    /**
+     * @param args the command line arguments C:\Users\e.beks\Desktop\
+     */
+    public static void main(String[] args)throws Exception {
+           Properties prop = new Properties();
+           File f = new File(args[0]); // configuration properties file name from input parameter
+           FileInputStream inputPropFile = null;
+        try {
+            inputPropFile = new FileInputStream(f);
+        } catch (FileNotFoundException ex) {
+            Logger.getLogger(FolderReader.class.getName()).log(Level.SEVERE, null, ex);
+            System.out.println("Initialazation failed!");
+        }                     
+        prop.load(inputPropFile);
+        inputPropFile.close();
+        System.out.println("Stream closed");
+        File folder = new File(prop.getProperty("directoryOfFolder")); // in properties are adress (properties will be replaced with GUI)
+        LIbrary1.listFilesForFolder(folder, args[0]); // excecutes file reading function
+    }
+}
