@@ -1,0 +1,24 @@
+package folderreader;
+import java.util.Properties;
+import java.awt.Desktop;
+import java.io.File;
+import java.io.IOException;
+
+public class LIbrary1 {
+            
+    public static void listFilesForFolder(final File folder, String directory) throws Exception {
+        String [] meltArgs = new String[2];
+        meltArgs[1] = directory;
+        for (final File fileEntry : folder.listFiles()) {
+            if (fileEntry.isDirectory()) {
+                System.out.println(fileEntry.getName() + "is a folder, not file!!");
+                listFilesForFolder(fileEntry, directory);   // recusive function checks trough folders too              
+            } else {
+                System.out.println(fileEntry.getName());
+                String FullExcelFilePath = folder.getPath() + "\\" + fileEntry.getName(); // this somehow should be given to properties file
+                meltArgs[0] = FullExcelFilePath;
+                Melt.main(meltArgs);
+            }
+        }
+    }
+}
