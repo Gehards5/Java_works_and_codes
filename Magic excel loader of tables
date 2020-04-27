@@ -1,0 +1,465 @@
+package folderreader;
+
+import java.text.*;
+import java.io.*;
+import org.apache.poi.xssf.usermodel.*;
+import org.apache.poi.ss.usermodel.*;
+import org.apache.poi.openxml4j.opc.OPCPackage;
+import java.util.*;
+import java.sql.*; 
+import oracle.jdbc.*;
+import com.monitorjbl.xlsx.StreamingReader;
+// Xlsx to DB import (Oracle and Sybase IQ supported)
+public class Melt {  
+    // Loads XLSX file into database
+    // There must be JDBC driver into "jdbc" directory
+    public static void main(String[] args) throws Exception{                
+        // <-- Variable and cosntant initialization
+        String DB_TYPE = null;
+        String DB_CURRENT_DATE_FUNCTION = null;            
+        String DB_STRING_TYPE = null;
+        String DB_NUMERIC_TYPE = null;
+        String DB_DATE_TYPE = "DATE";
+        String TXT_FILE_SEPERATOR = "|";        
+        // Here You can change sql insert batch size constant. It also impacts logging row count when loading.
+        int ROW_BATCH_SIZE = 10000;
+        // Column number - loop variable
+        int rowNum = 0;
+        // Column count in table
+        int noOfColumns = 0;  
+        int noOfColumnsNoType =0;        
+        // We assume that max column count = 512
+        // Column names array from 1st row
+        String[] colNamesArray = new String[512];
+        // Variable for normalized column name 
+        String normalizedColumnName = null;
+        // Variable for normalized column name 
+        String normalizedSheetName = null;
+        // Column types array
+        String[] colTypesArray = new String[512];                
+        // Prepared sql statement variable
+        PreparedStatement sqlStatement = null;
+        // Create table SQL string variable
+        String jdbcCreateSql = null;
+        // Insert SQL string variable
+        String jdbcInsertSql = null;
+        // Load table SQL string variable
+        String jdbcLoadSql = null;
+        // Variable for date vale for reading and formatting for IQ import
+        java.util.Date dateValue = null;
+        // Date format for IQ - when exporting to file
+        DateFormat dateFmt = new SimpleDateFormat("yyyy-MM-dd");
+        // Decimal pattern for IQ export file (txt)
+        String decimalPattern = "###################0.##########";
+        // Decimal format for IQ export file (txt) based on defined pattern
+        DecimalFormat decimalFormat = new DecimalFormat(decimalPattern);
+        // txt file name where exported data for IQ will be stored
+        String outputTxtFilename = null;            
+        // Output txt file for IQ load
+        Writer outputTxtFile = null;
+        // output txt file full path
+        String outputTxtFileFullPath = null;
+        // For storing data into CSV files
+        StringBuffer outputTxtDataBuffer = null;  
+        // Output table name string variable
+        String outputTableName = null;
+        //
+        DateFormat wallDateFormat = new SimpleDateFormat("dd.MM.yyyy HH:mm:ss");
+        java.util.Date wallDate = new java.util.Date();
+        // -->
+                
+        // Is xlsxFilename and propFilename arguments are not passed correctly passed
+        if (args.length != 2) {
+            System.out.println("Please provide source xlsx filename and configuration properties file name parameters. For example:"); 
+            System.out.println("java Melt budget.xlsx ora.properties"); 
+            return;
+        }        
+
+        // source xlsx filename from input parameter
+        String xlsxFilename = args[0];        
+        // configuration properties file name from input parameter
+        String propFilename = args[1];
+        
+        // <-- Read configuration file "%.properties" parameter values
+        Properties prop = new Properties();
+        
+        InputStream inputPropFile = new FileInputStream(propFilename);
+        prop.load(inputPropFile);
+        
+        int START_FROM_HEADER_ROW = Integer.parseInt(prop.getProperty("start_from_header_row"));
+        int START_FROM_SHEET = Integer.parseInt(prop.getProperty("start_from_sheet"));
+        String tableWithoutHeader = "no";
+        if (prop.getProperty("table_without_header") != null && prop.getProperty("table_without_header").equals("yes")) {
+          tableWithoutHeader = "yes";
+        };
+        
+        int START_FROM_HEADER_COL = 0;
+        if (prop.getProperty("start_from_header_col") != null) {
+          START_FROM_HEADER_COL = Integer.parseInt(prop.getProperty("start_from_header_col"));
+        };
+        
+        
+        int endSheet = 0;
+        int endRow = 0;
+        
+        inputPropFile.close();
+        // -->        
+        
+        // Determine DB type
+        if (prop.getProperty("jdbc_class").equals("oracle.jdbc.OracleDriver")) { DB_TYPE = "ORA"; } else { DB_TYPE = "IQ"; };
+        
+        // <-- DB dependent variables
+        // if this is Oracle db
+        if (DB_TYPE.equals("ORA")) {
+            DB_CURRENT_DATE_FUNCTION = "sysdate";            
+            DB_STRING_TYPE = "VARCHAR2(4000)";
+            DB_NUMERIC_TYPE = "NUMBER";
+        // else Sybase IQ
+        } else {
+            DB_CURRENT_DATE_FUNCTION = "getdate()";
+            DB_STRING_TYPE = "VARCHAR(4000)";
+            DB_NUMERIC_TYPE = "DECIMAL(38,4)";
+            
+            // txt file name where exported data for IQ will be stored
+            outputTxtFilename = xlsxFilename.replace(".xlsx",".txt").replace(".xlsm",".txt");            
+            // output txt file full path
+            outputTxtFileFullPath = (new File(outputTxtFilename)).getAbsolutePath();
+        }
+                
+        // --> db dependent variables
+        
+        // <-- Create DB connection (JDBC)
+        System.out.println("Connecting to DB...");
+        DriverManager.setLoginTimeout(10);
+        Class.forName(prop.getProperty("jdbc_class")); 
+        Connection conn = DriverManager.getConnection(prop.getProperty("jdbc_url"),prop.getProperty("db_user"),prop.getProperty("db_password"));
+        System.out.println("Connected!");
+        System.out.println(wallDateFormat.format(wallDate));        
+        System.out.println("");
+        // -->
+        
+        // <-- Start file stream reading
+        // Without streem reading it is impossible to process large xlsx files because you will get "out of memory" error
+        // In stream reading many builtin xlsx processiing functions are not supported - most;y direct references to cells and functions like getColCount and getRowCount
+        InputStream inputXlsxFile = new FileInputStream(new File(xlsxFilename));
+        
+        String xlsxFilenameWoPath = new File(xlsxFilename).getName();
+        
+        Workbook workbook = StreamingReader.builder()
+          .rowCacheSize(2)    // number of rows to keep in memory (defaults to 10)
+          .bufferSize(32)     // buffer size to use when reading InputStream to file (defaults to 1024)
+          .open(inputXlsxFile);            // InputStream or File for XLSX file (required)
+        // -->
+        
+        // Number of sheets in given xlsx file
+        int numberOfSheets = workbook.getNumberOfSheets();
+        System.out.println("Number of sheets = " + numberOfSheets);
+        System.out.println("");
+        
+        if (prop.getProperty("end_sheet") == null || prop.getProperty("end_sheet").equals("0")) {
+          endSheet = numberOfSheets - 1;
+        } else {
+          endSheet = Integer.parseInt(prop.getProperty("end_sheet"));
+        }
+        
+        //System.out.println("end_row = " + prop.getProperty("end_row"));
+        
+        if (prop.getProperty("end_row") == null || prop.getProperty("end_row").equals("0")) {
+          endRow = 0;
+        } else {
+          endRow = Integer.parseInt(prop.getProperty("end_row"));
+        }
+        
+        // Loop through every xlsx file sheet
+        for (int sheetIdx = START_FROM_SHEET; sheetIdx <= endSheet; sheetIdx++) {
+            System.out.println("Processing sheet " + sheetIdx);
+            
+            // Reset variables for every sheet
+            rowNum = START_FROM_HEADER_ROW;
+            noOfColumns = 0;
+            colNamesArray = new String[512];
+            colTypesArray = new String[512];
+            
+            
+            // IQ: We need to reset output file and string buffer
+            if (DB_TYPE.equals("IQ")) {
+                // For storing data into CSV files
+                outputTxtDataBuffer = new StringBuffer();
+                // Output txt file for IQ load
+                outputTxtFile = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(outputTxtFilename), "UTF-8"));
+            }
+            
+            // Load worksheet
+            Sheet myWorksheet = workbook.getSheetAt(sheetIdx);
+            normalizedSheetName = Normalizer.normalize(myWorksheet.getSheetName(), Normalizer.Form.NFD).replaceAll("[^\\x00-\\x7F]", "").replaceAll("[^A-Za-z0-9 _]", "").replaceAll(" ", "_");
+            normalizedSheetName = normalizedSheetName.toUpperCase().substring(0,Math.min(normalizedSheetName.length(), 30));
+
+            // Date format for table name
+            DateFormat dateFmtShort = new SimpleDateFormat("yyyyMMdd"); 
+            // Generated table_name (in future it will be possible to read multiple tables from one sheet. Then need to add "_T(i)")
+            // + "_" + dateFmtShort.format(new java.util.Date())
+            outputTableName = prop.getProperty("db_schema_name") + "." + prop.getProperty("table_name");
+            
+            if (prop.getProperty("use_multiple_tables").equals("yes")) { outputTableName = outputTableName + "__" + normalizedSheetName; };
+            
+            //System.out.println("tableWithoutHeader =  " + tableWithoutHeader);
+            
+           *********** deleted part was here ****************
+                        
+            // --> FIRST ROW processing - get column names and column count
+            
+            for (Row r : myWorksheet) {              
+              
+              // Stop loading data when empty row is reached!
+              if (endRow != 0 && (r == null || endRow == r.getRowNum())) {
+                System.out.println("Stopping on end row = " + r.getRowNum() + "!");
+                break;
+              }
+                            
+              rowNum++;
+              
+              ***************** deleted part ****************
+                      try {
+                          switch(c.getCellType()) {
+                          // If blank then will check type in next row
+                          case Cell.CELL_TYPE_BLANK:
+                              //System.out.println("BLANK");
+                              noOfColumnsNoType++;
+                              break;
+                          // String column
+                          case Cell.CELL_TYPE_STRING:
+                              //System.out.println("STRING");
+                              colTypesArray[i] = DB_STRING_TYPE;
+                              break;
+                          // Numeric column
+                          case Cell.CELL_TYPE_NUMERIC:
+                              //System.out.println("NUMERIC");
+                              if (DateUtil.isCellDateFormatted(c)) {
+                                  colTypesArray[i] = DB_DATE_TYPE;
+                              } else {                        
+                                  colTypesArray[i] = DB_NUMERIC_TYPE;
+                              }                        
+                              break; 
+                          // Formula column
+                          case Cell.CELL_TYPE_FORMULA:
+                              //System.out.println("FORMULA");
+                              colTypesArray[i] = DB_STRING_TYPE;
+                              break;    
+                          }
+                      } catch(NullPointerException e) {
+                          System.out.println("Get type exception - no type detected!");                      
+                          noOfColumnsNoType++;
+                          //colTypesArray[i] = DB_STRING_TYPE;
+                      }
+                      System.out.println("Detected type for row " + r.getRowNum() + " column " + i + " = " + colTypesArray[i]);                       
+                    }
+                }
+                ***************** deleted part ***********************
+                
+                //Always include file name
+                //System.out.println("**** bb colNamesArray[noOfColumns] =  " + colNamesArray[noOfColumns]);
+                colNamesArray[noOfColumns] = "FILE_NAME";
+                colTypesArray[noOfColumns] = DB_STRING_TYPE;
+                noOfColumns++; 
+                
+                //System.out.println("**** colNamesArray[noOfColumns] =  " + colNamesArray[noOfColumns]);
+                
+                // <-- drop/create table only once if use_multiple_tables = no, and for every sheet if use_multiple_tables=yes
+                if (sheetIdx == START_FROM_SHEET || prop.getProperty("use_multiple_tables").equals("yes")) {
+
+                    // <-- If we need to drop existing table
+                    if (prop.getProperty("drop_table").equals("yes")) {
+                        System.out.println("--Dropping table");
+                        String jdbcDropSql = "DROP TABLE " + outputTableName;                    
+                        System.out.println(jdbcDropSql);
+                        sqlStatement = conn.prepareStatement(jdbcDropSql);
+                        try {
+                            sqlStatement.executeUpdate();
+                        } catch (java.sql.SQLException sqle) {
+                          // Ignore error table or view does not exists when dropping!
+                          // If table does not exists than we need to create it.                      
+                        }
+                    }
+                    // --> Drop table
+                    
+                    // <-- Create table
+
+                    jdbcCreateSql = "CREATE TABLE " + outputTableName + " (";
+                    
+                    // For IQ import we need first as DUMMY column
+                    if (DB_TYPE.equals("IQ")) { jdbcCreateSql = jdbcCreateSql + "DUMMY1 VARCHAR(1) NULL,"; };
+                    
+                    // Set column name and data type for every column
+                    for (int i=0; i<noOfColumns; i++) {
+                        jdbcCreateSql = jdbcCreateSql + colNamesArray[i] + " " + colTypesArray[i] + " NULL,";
+                    }
+                
+                    jdbcCreateSql = jdbcCreateSql + "INSERT_DATE date default " + DB_CURRENT_DATE_FUNCTION + ")";
+                    System.out.println("--Creating table");
+                    System.out.println(jdbcCreateSql);
+                
+                    sqlStatement = conn.prepareStatement(jdbcCreateSql);
+                    
+                   ***************** deleted part was here ********************************
+                
+                if (DB_TYPE.equals("ORA")) {
+                  // <-- Prepare INSERT SQL for Oracle
+                  jdbcInsertSql = "INSERT INTO " + outputTableName + " VALUES (";
+                  for (int i = 0; i < noOfColumns; i++) {jdbcInsertSql = jdbcInsertSql + "?,";}
+                  jdbcInsertSql = jdbcInsertSql + " " + DB_CURRENT_DATE_FUNCTION + ")";            
+                  
+                  //System.out.println(jdbcInsertSql);
+                  sqlStatement = conn.prepareStatement(jdbcInsertSql);
+                  // depending on the number of rows in your Excel document set batch size
+                  ((OraclePreparedStatement)sqlStatement).setExecuteBatch(ROW_BATCH_SIZE);
+                  // -->
+                }
+                
+                System.out.println("");
+                
+                wallDate = new java.util.Date();
+                System.out.println(wallDateFormat.format(wallDate));
+                System.out.println("");
+                
+                // Start of data processing...
+                if (DB_TYPE.equals("ORA")) {
+                    System.out.println("--Inserting data from sheet " + (sheetIdx) + " ...");
+                    System.out.println(jdbcInsertSql);
+                } else {
+                    System.out.println("--Exporting rows to txt file from sheet " + sheetIdx + " ...");
+                }  
+              } // second row processing
+              
+              // For IQ we start every txt file line with seperator
+              if (DB_TYPE.equals("IQ")) { outputTxtDataBuffer.append(TXT_FILE_SEPERATOR); }
+
+              // Loop for every column
+              for (int i=0; i<noOfColumns-1; i++) {
+                  // We are not using cellIterator.next() to handle blan cells correctly
+                  Cell cell = r.getCell(i+START_FROM_HEADER_COL);
+                  
+                  // <-- cell data processing for ORA/IQ
+                  // ORA: Prepare INSERT statement bind variables from xlsx data
+                  // IQ: Add xlsx data to txt output buffer for txt output file (for IQ import)
+                  if (colTypesArray[i].equals(DB_STRING_TYPE)) {
+                      try {
+                          if (DB_TYPE.equals("ORA")) {
+                              sqlStatement.setString(i + 1, cell.getStringCellValue().replace("\"","").trim());
+                          } else {
+                              outputTxtDataBuffer.append(cell.getStringCellValue().replace("\"","").trim() + TXT_FILE_SEPERATOR);
+                          }
+                      // If blank value in cell then set null
+                      } catch(NullPointerException e) {
+                          if (DB_TYPE.equals("ORA")) {
+                              sqlStatement.setNull(i + 1,java.sql.Types.VARCHAR);
+                          } else {
+                              outputTxtDataBuffer.append("" + TXT_FILE_SEPERATOR);
+                          }  
+                      }
+                  } else if (colTypesArray[i].equals(DB_NUMERIC_TYPE)) {
+                      try {                          
+                          if (cell.getCellType() == Cell.CELL_TYPE_BLANK) {
+                              if (DB_TYPE.equals("ORA")) {
+                                  sqlStatement.setNull(i + 1,java.sql.Types.INTEGER);
+                              } else {
+                                  outputTxtDataBuffer.append("" + TXT_FILE_SEPERATOR);
+                              }
+                          } else {                                                      
+                              if (DB_TYPE.equals("ORA")) {
+                                  sqlStatement.setDouble(i + 1,cell.getNumericCellValue() );                                
+                              } else {
+                                  outputTxtDataBuffer.append(decimalFormat.format(cell.getNumericCellValue()).replace(",",".") + TXT_FILE_SEPERATOR);
+                              }
+                          }
+                      // If blank value in cell then set null
+                      } catch(Exception e) {
+                          if (DB_TYPE.equals("ORA")) {
+                              sqlStatement.setNull(i + 1,java.sql.Types.INTEGER);
+                          } else {
+                              outputTxtDataBuffer.append("" + TXT_FILE_SEPERATOR);
+                          }  
+                      }
+                  } else if (colTypesArray[i].equals(DB_DATE_TYPE)) {
+                      try {
+                          if (DB_TYPE.equals("ORA")) {
+                              sqlStatement.setDate(i + 1, new java.sql.Date(cell.getDateCellValue().getTime()));                        
+                          } else {
+                              dateValue = cell.getDateCellValue();
+                              outputTxtDataBuffer.append(dateFmt.format(dateValue) + TXT_FILE_SEPERATOR);
+                          }                            
+                      // If blank value in cell then set null
+                      } catch(Exception e) {
+                          if (DB_TYPE.equals("ORA")) {
+                              sqlStatement.setNull(i + 1,java.sql.Types.DATE);
+                          } else {
+                              outputTxtDataBuffer.append("" + TXT_FILE_SEPERATOR);
+                          }
+                      }
+                  // Used when formula is used to calculate cell value
+                  } else {
+                      try {
+                          if (DB_TYPE.equals("ORA")) {
+                              sqlStatement.setString(i + 1, cell.getStringCellValue().replace("\"","").trim());                     
+                          } else {
+                              outputTxtDataBuffer.append(cell.getStringCellValue().replace("\"","").trim() + TXT_FILE_SEPERATOR);
+                          }                            
+                      // If blank value in cell then set null
+                      } catch(NullPointerException e) {
+                          if (DB_TYPE.equals("ORA")) {
+                              sqlStatement.setNull(i + 1,java.sql.Types.VARCHAR);
+                          } else {
+                              outputTxtDataBuffer.append("" + TXT_FILE_SEPERATOR);
+                          } 
+                      }
+                  }
+                  // --> cell data processing for ORA/IQ
+              } // end of column loop
+              
+             **************** deleted code **************
+              
+              // INSERT sql statement will be executed only when batch size is reached (ROW_BATCH_SIZE)
+              // Only for Oracle
+              if (DB_TYPE.equals("ORA")) {
+                  try {
+                    sqlStatement.execute();
+                  } catch(Exception e) {
+                    sqlStatement.close();
+                    System.out.println("Sql statement closed.");
+                    conn.close();
+                    System.out.println("Connection closed.");
+                    throw e;
+                  }                    
+              } else {
+                  // For IQ txt string buffer - end of line
+                  outputTxtDataBuffer.append("\r\n");
+              };
+              
+              // Output how many rows are processed
+              if (rowNum % ROW_BATCH_SIZE == 0) {System.out.println(rowNum);}
+            } // end of row loop                                 
+            
+            // IQ: Write buffer data to txt file and load into IQ DB
+          ****************** deleted part was here ***************************
+                } catch(Exception e) {
+                  sqlStatement.close();
+                  System.out.println("Sql statement closed.");
+                  conn.close();
+                  System.out.println("Connection closed.");
+                  throw e;
+                }
+            }
+            
+            // Finishing work with DB and closing connection
+            conn.commit();
+            System.out.println("Successfully loaded " + rowNum + " rows.");
+            System.out.println("");
+            wallDate = new java.util.Date();
+            System.out.println(wallDateFormat.format(wallDate));
+        } // end of sheet loop                
+                        
+        sqlStatement.close();
+        conn.close(); 
+        inputXlsxFile.close();
+        workbook.close();        
+    } // end of main    
+}
